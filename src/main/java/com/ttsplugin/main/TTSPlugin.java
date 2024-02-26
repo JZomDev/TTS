@@ -7,6 +7,8 @@ import com.ttsplugin.enums.MessageType;
 import com.ttsplugin.enums.Voice;
 import com.ttsplugin.utils.Utils;
 import jaco.mp3.player.MP3Player;
+import java.time.temporal.ChronoUnit;
+import javax.sound.sampled.LineListener;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.Synchronized;
@@ -26,6 +28,7 @@ import net.runelite.client.input.KeyManager;
 import net.runelite.client.input.MouseManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.task.Schedule;
 import net.runelite.client.util.HotkeyListener;
 import net.runelite.client.util.Text;
 import org.apache.commons.text.StringEscapeUtils;
@@ -57,7 +60,9 @@ public class TTSPlugin extends Plugin {
 	private long lastProcess;
 	private Dialog lastDialog;
 	private final AtomicReference<Clip> currentClip = new AtomicReference<>();
+	Clip clip;
 	private final AtomicReference<Future<?>> queueTask = new AtomicReference<>();
+	CountDownLatch syncLatch = new CountDownLatch(1);
 
 	@Inject private Client client;
 	@Inject private TTSConfig config;
@@ -86,7 +91,14 @@ public class TTSPlugin extends Plugin {
 			keyboardHandler.handleHotkey(config.narrateQuantityHotkey());
 		}
 	};
-	
+
+
+	private final LineListener lineListener = event -> {
+		LineEvent.Type type = event.getType();
+		if (type == LineEvent.Type.STOP) {
+			syncLatch.countDown();
+		}
+	};
 	@Override
 	protected void startUp() {
 		// TODO: consolidate hotkey vs click message processing
@@ -313,9 +325,8 @@ public class TTSPlugin extends Plugin {
 			try (InputStream stream = new URL(request).openConnection().getInputStream()) {
 				bytes = ByteStreams.toByteArray(stream);
 			}
-
 			try (AudioInputStream inputStream = AudioSystem.getAudioInputStream(new ByteArrayInputStream(bytes))) {
-				Clip clip = AudioSystem.getClip();
+				clip = AudioSystem.getClip();
 				clip.open(inputStream);
 				currentClip.set(clip);
 
@@ -325,14 +336,14 @@ public class TTSPlugin extends Plugin {
 					Utils.setClipVolume(config.volume() / (float) 10, clip);
 				}
 
-				clip.addLineListener(event -> {
-					LineEvent.Type type = event.getType();
-					if (type == LineEvent.Type.STOP) {
-						currentClip.compareAndSet(clip, null);
-					}
-				});
+				syncLatch = new CountDownLatch(1);
 
+				clip.addLineListener(lineListener);
 				clip.start();
+
+				syncLatch.await();
+				clip.removeLineListener(lineListener);
+				stopClip();
 			}
 		} catch (Exception e) {
 			stopClip();
